@@ -10,7 +10,7 @@ import java.net.{InetAddress, NetworkInterface}
 import scala.collection.JavaConversions._
 import scala.util.Random
 
-import org.apache.spark.Logging
+import com.datastax.spark.connector.util.Logging
 
 /** Selects local node first and then nodes in local DC in random order. Never selects nodes from other DCs.
   * For writes, if a statement has a routing key set, this LBP is token aware - it prefers the nodes which
@@ -60,9 +60,10 @@ class LocalNodeFirstLoadBalancingPolicy(contactPoints: Set[InetAddress], localDC
 
   private def tokenAwareQueryPlan(keyspace: String, statement: Statement): JIterator[Host] = {
     assert(keyspace != null)
-    assert(statement.getRoutingKey != null)
+    assert(statement.getRoutingKey(ProtocolVersion.NEWEST_SUPPORTED, CodecRegistry.DEFAULT_INSTANCE) != null)
 
-    val replicas = findReplicas(keyspace, statement.getRoutingKey)
+    val replicas = findReplicas(keyspace,
+      statement.getRoutingKey(ProtocolVersion.NEWEST_SUPPORTED, CodecRegistry.DEFAULT_INSTANCE))
     val (localReplica, otherReplicas) = replicas.partition(isLocalHost)
     lazy val maybeShuffled = if (shuffleReplicas) random.shuffle(otherReplicas.toIndexedSeq) else otherReplicas
 
@@ -75,12 +76,12 @@ class LocalNodeFirstLoadBalancingPolicy(contactPoints: Set[InetAddress], localDC
   override def newQueryPlan (loggedKeyspace: String, statement: Statement): JIterator[Host] = {
     val keyspace = if (statement.getKeyspace == null) loggedKeyspace else statement.getKeyspace
 
-    if (statement.getRoutingKey == null || keyspace == null)
+    if (statement.getRoutingKey(ProtocolVersion.NEWEST_SUPPORTED, CodecRegistry.DEFAULT_INSTANCE) == null || keyspace == null)
       tokenUnawareQueryPlan(keyspace, statement)
     else
       tokenAwareQueryPlan(keyspace, statement)
   }
-
+  
   override def onAdd(host: Host) {
     // The added host might be a "better" version of a host already in the set.
     // The nodes added in the init call don't have DC and rack set.
@@ -93,11 +94,8 @@ class LocalNodeFirstLoadBalancingPolicy(contactPoints: Set[InetAddress], localDC
     nodes -= host
     logInfo(s"Removed host ${host.getAddress.getHostAddress} (${host.getDatacenter})")
   }
-  override def onSuspected(host: Host) = {
-    nodes += host
-    logInfo(s"Suspected host ${host.getAddress.getHostAddress} (${host.getDatacenter})")
-  }
 
+  override def close() = { }
   override def onUp(host: Host) = { }
   override def onDown(host: Host) = { }
 

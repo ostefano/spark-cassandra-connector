@@ -15,8 +15,8 @@
  */
 
 import java.io.File
+import java.nio.file.{Paths, Files}
 
-import scala.collection.mutable
 import scala.language.postfixOps
 
 import com.scalapenos.sbt.prompt.SbtPrompt.autoImport._
@@ -24,12 +24,16 @@ import com.typesafe.sbt.SbtScalariform
 import com.typesafe.sbt.SbtScalariform._
 import com.typesafe.tools.mima.plugin.MimaKeys._
 import com.typesafe.tools.mima.plugin.MimaPlugin._
-import net.virtualvoid.sbt.graph.Plugin.graphSettings
 import sbt.Keys._
+import sbt.Tests._
 import sbt._
-import sbtassembly.Plugin.AssemblyKeys._
-import sbtassembly.Plugin._
+import sbtassembly.AssemblyKeys._
+import sbtassembly.AssemblyPlugin._
+import sbtassembly._
 import sbtrelease.ReleasePlugin._
+import sbtsparkpackage.SparkPackagePlugin.autoImport._
+import java.lang.management.ManagementFactory;
+import com.sun.management.OperatingSystemMXBean;
 
 object Settings extends Build {
 
@@ -37,23 +41,69 @@ object Settings extends Build {
 
   val versionStatus = settingKey[Unit]("The Scala version used in cross-build reapply for '+ package', '+ publish'.")
 
+  val cassandraServerClasspath = taskKey[String]("Cassandra server classpath")
+
+  val mavenLocalResolver = BuildUtil.mavenLocalResolver
+
+  // Travis has limited quota, so we cannot use many C* instances simultaneously
+  val isTravis = sys.props.getOrElse("travis", "false").toBoolean
+
+  val osmxBean = ManagementFactory.getOperatingSystemMXBean.asInstanceOf[OperatingSystemMXBean]
+  val sysMemoryInMB = osmxBean.getTotalPhysicalMemorySize >> 20
+  val singleRunRequiredMem = 3 * 1024 + 512
+  val parallelTasks = if (isTravis) 1 else Math.max(1, ((sysMemoryInMB - 1550) / singleRunRequiredMem).toInt)
+
+  // Due to lack of entrophy on virtual machines we want to use /dev/urandom instead of /dev/random
+  val useURandom = Files.exists(Paths.get("/dev/urandom"))
+  val uRandomParams = if (useURandom) Seq("-Djava.security.egd=file:/dev/./urandom") else Seq.empty
+
+  lazy val mainDir = {
+    val dir = new File(".")
+    IO.delete(new File(dir, "target/ports"))
+    dir
+  }
+
+  val cassandraTestVersion = sys.props.get("test.cassandra.version").getOrElse(Versions.Cassandra)
+
+  lazy val TEST_JAVA_OPTS = Seq(
+    "-Xmx512m",
+    s"-Dtest.cassandra.version=$cassandraTestVersion",
+    "-Dsun.io.serialization.extendedDebugInfo=true",
+    s"-DbaseDir=${mainDir.getAbsolutePath}") ++ uRandomParams
+
+  var TEST_ENV: Option[Map[String, String]] = None
+
+  val asfSnapshotsResolver = "ASF Snapshots" at "https://repository.apache.org/content/groups/snapshots"
+  val asfStagingResolver = "ASF Staging" at "https://repository.apache.org/content/groups/staging"
+
   def currentCommitSha = ("git rev-parse --short HEAD" !!).split('\n').head.trim
 
   def versionSuffix = {
     sys.props.get("publish.version.type").map(_.toLowerCase) match {
-      case Some("release") ⇒ ""
-      case Some("commit-release") ⇒ s"-$currentCommitSha"
-      case _ ⇒ "-SNAPSHOT"
+      case Some("release") => ""
+      case Some("commit-release") => s"-$currentCommitSha"
+      case _ => "-SNAPSHOT"
     }
   }
 
+  def currentVersion = ("git describe --tags --match v*" !!).trim.substring(1)
+
   lazy val buildSettings = Seq(
     organization         := "com.datastax.spark",
-    version in ThisBuild := s"1.4.0-M3$versionSuffix",
+    version in ThisBuild := currentVersion,
     scalaVersion         := Versions.scalaVersion,
     crossScalaVersions   := Versions.crossScala,
     crossVersion         := CrossVersion.binary,
     versionStatus        := Versions.status(scalaVersion.value, scalaBinaryVersion.value)
+  )
+
+  lazy val sparkPackageSettings = Seq(
+    spName := "datastax/spark-cassandra-connector",
+    sparkVersion := Versions.Spark,
+    spAppendScalaVersion := true,
+    spIncludeMaven := true,
+    spIgnoreProvided := true,
+    credentials += Credentials(Path.userHome / ".ivy2" / ".credentials")
   )
 
   override lazy val settings = super.settings ++ buildSettings ++ Seq(
@@ -64,7 +114,7 @@ object Settings extends Build {
                   |A library that exposes Cassandra tables as Spark RDDs, writes Spark RDDs to
                   |Cassandra tables, and executes CQL queries in Spark applications.""".stringPrefix,
     homepage := Some(url("https://github.com/datastax/spark-cassandra-connector")),
-    licenses := Seq(("Apache License, Version 2.0", url("http://www.apache.org/licenses/LICENSE-2.0"))),
+    licenses := Seq(("Apache License 2.0", url("http://www.apache.org/licenses/LICENSE-2.0"))),
     promptTheme := ScalapenosTheme
   )
 
@@ -82,7 +132,11 @@ object Settings extends Build {
 
   val encoding = Seq("-encoding", "UTF-8")
 
-  lazy val projectSettings = graphSettings ++ Seq(
+  val installSparkTask = taskKey[Unit]("Optionally install Spark from Git to local Maven repository")
+
+  lazy val projectSettings = Seq(
+
+    concurrentRestrictions in Global += Tags.limit(Tags.Test, parallelTasks),
 
     aggregate in update := false,
 
@@ -130,11 +184,17 @@ object Settings extends Build {
     updateOptions := updateOptions.value.withCachedResolution(cachedResoluton = true),
 
     ivyLoggingLevel in ThisBuild := UpdateLogging.Quiet,
-    parallelExecution in ThisBuild := false,
-    parallelExecution in Global := false,
+    parallelExecution in ThisBuild := true,
+    parallelExecution in Global := true,
     apiMappings ++= DocumentationMapping.mapJarToDocURL(
       (managedClasspath in (Compile, doc)).value,
-      Dependencies.documentationMappings)
+      Dependencies.documentationMappings),
+    installSparkTask := {
+      val dir = new File(".").toPath
+      SparkInstaller(scalaBinaryVersion.value, dir)
+    },
+    resolvers ++= Seq(mavenLocalResolver, asfStagingResolver, asfSnapshotsResolver),
+    update <<= (installSparkTask, update) map {(_, out) => out}
   )
 
   lazy val mimaSettings = mimaDefaultSettings ++ Seq(
@@ -170,7 +230,7 @@ object Settings extends Build {
       cp
     }
   )
-  lazy val assembledSettings = defaultSettings ++ customTasks ++ sbtAssemblySettings
+  lazy val assembledSettings = defaultSettings ++ customTasks ++ sparkPackageSettings ++ sbtAssemblySettings
 
   val testOptionSettings = Seq(
     Tests.Argument(TestFrameworks.ScalaTest, "-oDF"),
@@ -191,39 +251,86 @@ object Settings extends Build {
     publish in (IntegrationTest,packageBin) := ()
   )
 
-  lazy val testSettings = testConfigs ++ testArtifacts ++ graphSettings ++ Seq(
-    parallelExecution in Test := false,
-    parallelExecution in IntegrationTest := false,
-    javaOptions in IntegrationTest ++= Seq(
-      "-XX:MaxPermSize=256M", "-Xmx1g"
-    ),
+  def makeTestGroups(tests: Seq[TestDefinition]): Seq[Group] = {
+    // if we have many C* instances and we can run multiple tests in parallel, then group by package name
+    // additional groups for auth and ssl is just an optimisation
+    def multiCInstanceGroupingFunction(test: TestDefinition): String = {
+      if (test.name.toLowerCase.contains("auth")) "auth"
+      else if (test.name.toLowerCase.contains("ssl")) "ssl"
+      else if (test.name.contains("CustomFromDriverSpec")) "customdriverspec"
+      else test.name.reverse.dropWhile(_ != '.').reverse
+    }
+
+    // if we have a single C* create as little groups as possible to avoid restarting C*
+    // the minimum - we need to run REPL and streaming tests in separate processes
+    // additional groups for auth and ssl is just an optimisation
+    // A new group is made for CustomFromDriverSpec because the ColumnType needs to be
+    // Initilized afresh
+    def singleCInstanceGroupingFunction(test: TestDefinition): String = {
+      val pkgName = test.name.reverse.dropWhile(_ != '.').reverse
+      if (test.name.toLowerCase.contains("authenticate")) "auth"
+      else if (test.name.toLowerCase.contains("ssl")) "ssl"
+      else if (pkgName.contains(".repl")) "repl"
+      else if (pkgName.contains(".streaming")) "streaming"
+      else if (test.name.contains("CustomFromDriverSpec")) "customdriverspec"
+      else "other"
+    }
+
+    val groupingFunction = if (parallelTasks == 1) singleCInstanceGroupingFunction _ else multiCInstanceGroupingFunction _
+
+    tests.groupBy(groupingFunction).map { case (pkg, testsSeq) =>
+      new Group(
+        name = pkg,
+        tests = testsSeq,
+        runPolicy = SubProcess(ForkOptions(
+          runJVMOptions = TEST_JAVA_OPTS,
+          envVars = TEST_ENV.getOrElse(sys.env),
+          outputStrategy = Some(StdoutOutput))))
+    }.toSeq
+  }
+
+  lazy val testSettings = testConfigs ++ testArtifacts ++ Seq(
+    parallelExecution in Test := true,
+    parallelExecution in IntegrationTest := true,
+    javaOptions in IntegrationTest ++= TEST_JAVA_OPTS,
     testOptions in Test ++= testOptionSettings,
     testOptions in IntegrationTest ++= testOptionSettings,
+    testGrouping in IntegrationTest <<= definedTests in IntegrationTest map makeTestGroups,
     fork in Test := true,
     fork in IntegrationTest := true,
     managedSourceDirectories in Test := Nil,
     (compile in IntegrationTest) <<= (compile in Test, compile in IntegrationTest) map { (_, c) => c },
-    managedClasspath in IntegrationTest <<= Classpaths.concat(managedClasspath in IntegrationTest, exportedProducts in Test)
+    (internalDependencyClasspath in IntegrationTest) <<= Classpaths.concat(
+      internalDependencyClasspath in IntegrationTest,
+      exportedProducts in Test)
   )
 
-  lazy val japiSettings = Seq(
-    publishArtifact := true
+  lazy val pureCassandraSettings = Seq(
+    test in IntegrationTest <<= (
+      cassandraServerClasspath in CassandraSparkBuild.cassandraServerProject in IntegrationTest,
+      envVars in IntegrationTest,
+      test in IntegrationTest) { case (cassandraServerClasspathTask, envVarsTask, testTask) =>
+        cassandraServerClasspathTask.flatMap(_ => envVarsTask).flatMap(_ => testTask)
+    },
+    envVars in IntegrationTest := {
+      val env = sys.env +
+        ("CASSANDRA_CLASSPATH" ->
+          (cassandraServerClasspath in CassandraSparkBuild.cassandraServerProject in IntegrationTest).value) +
+        ("SPARK_LOCAL_IP" -> "127.0.0.1")
+      TEST_ENV = Some(env)
+      env
+    }
   )
-
-  lazy val kafkaDemoSettings = Seq(
-    excludeFilter in unmanagedSources := (CrossVersion.partialVersion(scalaVersion.value) match {
-      case Some((2, minor)) if minor < 11 => HiddenFileFilter || "*Scala211App*"
-      case _ => HiddenFileFilter || "*WordCountApp*"
-    }))
 
   lazy val sbtAssemblySettings = assemblySettings ++ Seq(
     parallelExecution in assembly := false,
-    jarName in assembly <<= (baseDirectory, version) map { (dir, version) => s"${dir.name}-assembly-$version.jar" },
+    assemblyJarName in assembly <<= (baseDirectory, version) map { (dir, version) => s"${dir.name}-assembly-$version.jar" },
     run in Compile <<= Defaults.runTask(fullClasspath in Compile, mainClass in (Compile, run), runner in (Compile, run)),
     assemblyOption in assembly ~= { _.copy(includeScala = false) },
-    mergeStrategy in assembly <<= (mergeStrategy in assembly) {
+    assemblyMergeStrategy in assembly <<= (assemblyMergeStrategy in assembly) {
       (old) => {
-        case PathList("com", "google", xs @ _*) => MergeStrategy.last
+        case PathList("META-INF", "MANIFEST.MF") => MergeStrategy.discard
+        case PathList("META-INF", xs @ _*) => MergeStrategy.last
         case x => old(x)
       }
     }

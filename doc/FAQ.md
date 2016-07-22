@@ -15,8 +15,8 @@ If you see that only a single task has been created this means that the Cassandr
 not been split into a enough tasks to be well parallelized on your cluster. The number of 
 Spark partitions(tasks) created is directly controlled by the setting 
 `spark.cassandra.input.split.size_in_mb`.
-This number reflects the approximate number of live Cassandra Partitions in a given Spark partition.
-To increase the number of Spark Partitions decrease this number from the default (100k) to one that
+This number reflects the approximate amount of Cassandra Data in any given Spark partition.
+To increase the number of Spark Partitions decrease this number from the default (64mb) to one that
 will sufficiently break up your C* token range. This can also be adjusted on a per cassandraTable basis
 with the function `withReadConf` and specifying a new `ReadConf` object.
 
@@ -104,6 +104,11 @@ the rpc_address is set to.
 When troubleshooting Cassandra connections it is sometimes useful to set the rpc_address in the
 C* yaml file to `0.0.0.0` so any incoming connection will work.
 
+### What does input.split.size_in_mb use to determine size?
+
+Input.split.size_in_mb uses a internal system table in C* ( >= 2.1.5) to determine the size
+of the data in C*. The table is called system.size_estimates is not meant to be absolutely accurate 
+so there will be some inaccuracy with smaller tables and split sizes. 
 
 ### Can I contribute to the Spark Cassandra Connector?
 

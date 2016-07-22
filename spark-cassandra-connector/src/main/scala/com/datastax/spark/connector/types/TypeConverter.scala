@@ -2,15 +2,18 @@ package com.datastax.spark.connector.types
 
 import java.net.InetAddress
 import java.nio.ByteBuffer
-import java.util.{Calendar, GregorianCalendar, UUID, Date}
+import java.util.concurrent.TimeUnit
+import java.util.{Calendar, Date, GregorianCalendar, TimeZone, UUID}
 
 import scala.collection.JavaConversions._
 import scala.collection.immutable.{TreeMap, TreeSet}
 import scala.reflect.runtime.universe._
 
 import org.apache.commons.lang3.tuple
-import org.joda.time.DateTime
+import org.apache.spark.sql.catalyst.ReflectionLock.SparkReflectionLock
+import org.joda.time.{DateTime, DateTimeZone}
 
+import com.datastax.driver.core.LocalDate
 import com.datastax.spark.connector.TupleValue
 import com.datastax.spark.connector.UDTValue.UDTValueConverter
 import com.datastax.spark.connector.util.{ByteBufferUtil, Symbols}
@@ -29,7 +32,7 @@ trait TypeConverter[T] extends Serializable {
   def targetTypeTag: TypeTag[T]
 
   /** String representation of the converter target type.*/
-  def targetTypeName: String = TypeTag.synchronized(
+  def targetTypeName: String = SparkReflectionLock.synchronized(
     targetTypeTag.tpe.toString)
 
   /** Returns a function converting an object into `T`. */
@@ -67,7 +70,9 @@ class ChainedTypeConverter[T](converters: TypeConverter[T]*) extends TypeConvert
   * method `CassandraRow#get`, which picks up the right converter basing solely on its type argument. */
 object TypeConverter {
 
-  private val AnyTypeTag = TypeTag.synchronized {
+  lazy val defaultTimezone = TimeZone.getDefault
+
+  private val AnyTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[Any]]
   }
 
@@ -78,7 +83,7 @@ object TypeConverter {
     }
   }
 
-  private val AnyRefTypeTag = TypeTag.synchronized {
+  private val AnyRefTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[AnyRef]]
   }
 
@@ -89,7 +94,7 @@ object TypeConverter {
     }
   }
 
-  private val BooleanTypeTag = TypeTag.synchronized {
+  private val BooleanTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[Boolean]]
   }
 
@@ -104,7 +109,7 @@ object TypeConverter {
     }
   }
 
-  private val JavaBooleanTypeTag = TypeTag.synchronized {
+  private val JavaBooleanTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[java.lang.Boolean]]
   }
 
@@ -113,7 +118,7 @@ object TypeConverter {
     def convertPF = BooleanConverter.convertPF.andThen(_.asInstanceOf[java.lang.Boolean])
   }
 
-  private val ByteTypeTag = TypeTag.synchronized {
+  private val ByteTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[Byte]]
   }
 
@@ -125,7 +130,7 @@ object TypeConverter {
     }
   }
 
-  private val JavaByteTypeTag = TypeTag.synchronized {
+  private val JavaByteTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[java.lang.Byte]]
   }
 
@@ -134,7 +139,7 @@ object TypeConverter {
     def convertPF = ByteConverter.convertPF.andThen(_.asInstanceOf[java.lang.Byte])
   }
 
-  private val ShortTypeTag = TypeTag.synchronized {
+  private val ShortTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[Short]]
   }
 
@@ -146,7 +151,7 @@ object TypeConverter {
     }
   }
 
-  private val JavaShortTypeTag = TypeTag.synchronized {
+  private val JavaShortTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[java.lang.Short]]
   }
 
@@ -155,7 +160,7 @@ object TypeConverter {
     def convertPF = ShortConverter.convertPF.andThen(_.asInstanceOf[java.lang.Short])
   }
 
-  private val IntTypeTag = TypeTag.synchronized {
+  private val IntTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[Int]]
   }
 
@@ -167,7 +172,7 @@ object TypeConverter {
     }
   }
 
-  private val JavaIntTypeTag = TypeTag.synchronized {
+  private val JavaIntTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[java.lang.Integer]]
   }
 
@@ -176,7 +181,7 @@ object TypeConverter {
     def convertPF = IntConverter.convertPF.andThen(_.asInstanceOf[java.lang.Integer])
   }
 
-  private val LongTypeTag = TypeTag.synchronized {
+  private val LongTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[Long]]
   }
 
@@ -191,7 +196,7 @@ object TypeConverter {
     }
   }
 
-  private val JavaLongTypeTag = TypeTag.synchronized {
+  private val JavaLongTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[java.lang.Long]]
   }
 
@@ -200,7 +205,7 @@ object TypeConverter {
     def convertPF = LongConverter.convertPF.andThen(_.asInstanceOf[java.lang.Long])
   }
 
-  private val FloatTypeTag = TypeTag.synchronized {
+  private val FloatTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[Float]]
   }
 
@@ -212,7 +217,7 @@ object TypeConverter {
     }
   }
 
-  private val JavaFloatTypeTag = TypeTag.synchronized {
+  private val JavaFloatTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[java.lang.Float]]
   }
 
@@ -221,7 +226,7 @@ object TypeConverter {
     def convertPF = FloatConverter.convertPF.andThen(_.asInstanceOf[java.lang.Float])
   }
 
-  private val DoubleTypeTag = TypeTag.synchronized {
+  private val DoubleTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[Double]]
   }
 
@@ -233,7 +238,7 @@ object TypeConverter {
     }
   }
 
-  private val JavaDoubleTypeTag = TypeTag.synchronized {
+  private val JavaDoubleTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[java.lang.Double]]
   }
 
@@ -242,7 +247,7 @@ object TypeConverter {
     def convertPF = DoubleConverter.convertPF.andThen(_.asInstanceOf[java.lang.Double])
   }
 
-  private val StringTypeTag = TypeTag.synchronized {
+  private val StringTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[String]]
   }
 
@@ -258,7 +263,7 @@ object TypeConverter {
     }
   }
 
-  private val ByteBufferTypeTag = TypeTag.synchronized {
+  private val ByteBufferTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[ByteBuffer]]
   }
 
@@ -270,7 +275,7 @@ object TypeConverter {
     }
   }
 
-  private val ByteArrayTypeTag = TypeTag.synchronized {
+  private val ByteArrayTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[Array[Byte]]]
   }
 
@@ -282,7 +287,7 @@ object TypeConverter {
     }
   }
 
-  private val DateTypeTag = TypeTag.synchronized {
+  private val DateTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[Date]]
   }
 
@@ -294,20 +299,36 @@ object TypeConverter {
       case x: Calendar => x.getTime
       case x: Long => new Date(x)
       case x: UUID if x.version() == 1 => new Date(x.timestamp())
+      case x: LocalDate => new Date(x.getMillisSinceEpoch)
       case x: String => TimestampParser.parse(x)
+      case x: org.joda.time.LocalDate => x.toDateTimeAtStartOfDay(DateTimeZone.UTC).toDate
     }
   }
 
-  private val SqlDateTypeTag = TypeTag.synchronized {
+  private val SqlDateTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[java.sql.Date]]
   }
 
   implicit object SqlDateConverter extends NullableTypeConverter[java.sql.Date] {
+
+    /* java.sql.Date assume that the internal timestamp is offset by the local timezone. This means
+    a direct conversion from LocalDate to java.sql.Date will actually change the Year-Month-Day
+    stored.
+     */
+    def subtractTimeZoneOffset(millis: Long) = millis - defaultTimezone.getOffset(millis)
+
     def targetTypeTag = SqlDateTypeTag
-    def convertPF = DateConverter.convertPF.andThen(d => new java.sql.Date(d.getTime))
+
+    val shiftLocalDate: PartialFunction[Any, java.sql.Date] = {
+      case x: LocalDate => new java.sql.Date(subtractTimeZoneOffset(x.getMillisSinceEpoch))
+      case x: org.joda.time.LocalDate => shiftLocalDate(LocalDateConverter.convertPF(x))
+    }
+
+    //If there is no Local Date input we will use the normal date converter
+    def convertPF = shiftLocalDate orElse DateConverter.convertPF.andThen(d => new java.sql.Date(d.getTime))
   }
 
-  private val JodaDateTypeTag = TypeTag.synchronized {
+  private val JodaDateTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[DateTime]]
   }
 
@@ -316,7 +337,7 @@ object TypeConverter {
     def convertPF = DateConverter.convertPF.andThen(new DateTime(_))
   }
 
-  private val GregorianCalendarTypeTag = TypeTag.synchronized {
+  private val GregorianCalendarTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[GregorianCalendar]]
   }
 
@@ -330,7 +351,7 @@ object TypeConverter {
     def convertPF = DateConverter.convertPF.andThen(calendar)
   }
 
-  private val BigIntTypeTag = TypeTag.synchronized {
+  private val BigIntTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[BigInt]]
   }
 
@@ -345,7 +366,7 @@ object TypeConverter {
     }
   }
 
-  private val JavaBigIntegerTypeTag = TypeTag.synchronized {
+  private val JavaBigIntegerTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[java.math.BigInteger]]
   }
 
@@ -357,10 +378,13 @@ object TypeConverter {
       case x: java.lang.Integer => new java.math.BigInteger(x.toString)
       case x: java.lang.Long => new java.math.BigInteger(x.toString)
       case x: String => new java.math.BigInteger(x)
+      case x: java.math.BigDecimal if x.scale() <= 0 => x.toBigInteger
+      case x: java.math.BigDecimal if x.scale() > 0 => throw new TypeConversionException(
+        s"BigDecimal ($x) has scale greater than 0 (Scale: ${x.scale()}) and cannot be converted to BigInteger")
     }
   }
 
-  private val BigDecimalTypeTag = TypeTag.synchronized {
+  private val BigDecimalTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[BigDecimal]]
   }
 
@@ -372,7 +396,7 @@ object TypeConverter {
     }
   }
 
-  private val JavaBigDecimalTypeTag = TypeTag.synchronized {
+  private val JavaBigDecimalTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[java.math.BigDecimal]]
   }
 
@@ -384,7 +408,7 @@ object TypeConverter {
     }
   }
 
-  private val UUIDTypeTag = TypeTag.synchronized {
+  private val UUIDTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[UUID]]
   }
 
@@ -396,7 +420,7 @@ object TypeConverter {
     }
   }
 
-  private val InetAddressTypeTag = TypeTag.synchronized {
+  private val InetAddressTypeTag = SparkReflectionLock.synchronized {
     implicitly[TypeTag[InetAddress]]
   }
 
@@ -408,11 +432,44 @@ object TypeConverter {
     }
   }
 
+  private val LocalDateTypeTag = SparkReflectionLock.synchronized {
+    implicitly[TypeTag[LocalDate]]
+  }
+
+  implicit object LocalDateConverter extends NullableTypeConverter[LocalDate] {
+    def targetTypeTag = LocalDateTypeTag
+    val dateRegx = """(\d\d\d\d)-(\d\d)-(\d\d)""".r
+
+    /* java.sql.Date assume that the internal timestamp is offset by the local timezone. This means
+    a direct conversion from LocalDate to java.sql.Date will actually change the Year-Month-Day
+    stored. (See the SqlDate converter for the opposite adjustment)
+     */
+    def addTimeZoneOffset(millis: Long) =  millis + defaultTimezone.getOffset(millis)
+
+    def convertPF = {
+      case x: LocalDate => x
+      case dateRegx(y, m, d) => LocalDate.fromYearMonthDay(y.toInt, m.toInt, d.toInt)
+      case x: Int => LocalDate.fromDaysSinceEpoch(x)
+      case x: java.sql.Date => LocalDate.fromMillisSinceEpoch(addTimeZoneOffset(x.getTime))
+      case x: Date => LocalDate.fromMillisSinceEpoch(x.getTime)
+      case x: DateTime => LocalDate.fromMillisSinceEpoch(x.getMillis)
+      case x: org.joda.time.LocalDate => LocalDate.fromYearMonthDay(x.getYear, x.getMonthOfYear, x.getDayOfMonth)
+    }
+  }
+
+  object TimeTypeConverter extends NullableTypeConverter[java.lang.Long] {
+    def targetTypeTag = JavaLongTypeTag
+    def convertPF = {
+      case x: Date => TimeUnit.MILLISECONDS.toNanos(x.getTime)
+      case x: Long => x.toLong
+    }
+  }
+
   class Tuple2Converter[K, V](implicit kc: TypeConverter[K], vc: TypeConverter[V])
     extends TypeConverter[(K, V)] {
 
     @transient
-    lazy val targetTypeTag = TypeTag.synchronized {
+    lazy val targetTypeTag = SparkReflectionLock.synchronized {
       implicit val kTag = kc.targetTypeTag
       implicit val vTag = vc.targetTypeTag
       implicitly[TypeTag[(K, V)]]
@@ -432,7 +489,7 @@ object TypeConverter {
     private val c3 = implicitly[TypeConverter[C3]]
 
     @transient
-    lazy val targetTypeTag = TypeTag.synchronized {
+    lazy val targetTypeTag = SparkReflectionLock.synchronized {
       implicit val tag1 = c1.targetTypeTag
       implicit val tag2 = c2.targetTypeTag
       implicit val tag3 = c3.targetTypeTag
@@ -449,7 +506,7 @@ object TypeConverter {
     extends TypeConverter[tuple.Pair[K, V]] {
 
     @transient
-    lazy val targetTypeTag = TypeTag.synchronized {
+    lazy val targetTypeTag = SparkReflectionLock.synchronized {
       implicit val kTag = kc.targetTypeTag
       implicit val vTag = vc.targetTypeTag
       implicitly[TypeTag[tuple.Pair[K, V]]]
@@ -469,7 +526,7 @@ object TypeConverter {
     private val c3 = implicitly[TypeConverter[C3]]
 
     @transient
-    lazy val targetTypeTag = TypeTag.synchronized {
+    lazy val targetTypeTag = SparkReflectionLock.synchronized {
       implicit val tag1 = c1.targetTypeTag
       implicit val tag2 = c2.targetTypeTag
       implicit val tag3 = c3.targetTypeTag
@@ -485,14 +542,30 @@ object TypeConverter {
   class OptionConverter[T](implicit c: TypeConverter[T]) extends TypeConverter[Option[T]] {
 
     @transient
-    lazy val targetTypeTag = TypeTag.synchronized {
+    lazy val targetTypeTag = SparkReflectionLock.synchronized {
       implicit val itemTypeTag = c.targetTypeTag
       implicitly[TypeTag[Option[T]]]
     }
 
     def convertPF = {
       case null => None
+      case None => None
       case other => Some(c.convert(other))
+    }
+  }
+
+  class CassandraOptionConverter[T](implicit c: TypeConverter[T]) extends
+    TypeConverter[CassandraOption[T]] {
+
+    @transient
+    lazy val targetTypeTag = TypeTag.synchronized {
+      implicit val itemTypeTag = c.targetTypeTag
+      implicitly[TypeTag[CassandraOption[T]]]
+    }
+
+    def convertPF = {
+      case null => CassandraOption.Unset
+      case other => CassandraOption.Value(c.convert(other))
     }
   }
 
@@ -527,108 +600,111 @@ object TypeConverter {
 
   class ListConverter[T : TypeConverter] extends CollectionConverter[List[T], T] {
     @transient
-    lazy val targetTypeTag = TypeTag.synchronized {
+    lazy val targetTypeTag = SparkReflectionLock.synchronized {
       implicitly[TypeTag[List[T]]]
     }
   }
 
   class VectorConverter[T : TypeConverter] extends CollectionConverter[Vector[T], T] {
     @transient
-    lazy val targetTypeTag = TypeTag.synchronized {
+    lazy val targetTypeTag = SparkReflectionLock.synchronized {
       implicitly[TypeTag[Vector[T]]]
     }
   }
 
   class SetConverter[T : TypeConverter] extends CollectionConverter[Set[T], T] {
     @transient
-    lazy val targetTypeTag = TypeTag.synchronized {
+    lazy val targetTypeTag = SparkReflectionLock.synchronized {
       implicitly[TypeTag[Set[T]]]
     }
   }
 
   class TreeSetConverter[T : TypeConverter : Ordering] extends CollectionConverter[TreeSet[T], T] {
     @transient
-    lazy val targetTypeTag = TypeTag.synchronized {
+    lazy val targetTypeTag = SparkReflectionLock.synchronized {
       implicitly[TypeTag[TreeSet[T]]]
     }
   }
 
   class SeqConverter[T : TypeConverter] extends CollectionConverter[Seq[T], T] {
     @transient
-    lazy val targetTypeTag = TypeTag.synchronized {
+    lazy val targetTypeTag = SparkReflectionLock.synchronized {
       implicitly[TypeTag[Seq[T]]]
     }
   }
 
   class IndexedSeqConverter[T : TypeConverter] extends CollectionConverter[IndexedSeq[T], T] {
     @transient
-    lazy val targetTypeTag = TypeTag.synchronized {
+    lazy val targetTypeTag = SparkReflectionLock.synchronized {
       implicitly[TypeTag[IndexedSeq[T]]]
     }
   }
 
   class IterableConverter[T : TypeConverter] extends CollectionConverter[Iterable[T], T] {
     @transient
-    lazy val targetTypeTag = TypeTag.synchronized {
+    lazy val targetTypeTag = SparkReflectionLock.synchronized {
       implicitly[TypeTag[Iterable[T]]]
     }
   }
 
   class JavaListConverter[T : TypeConverter] extends CollectionConverter[java.util.List[T], T] {
     @transient
-    lazy val targetTypeTag = TypeTag.synchronized {
+    lazy val targetTypeTag = SparkReflectionLock.synchronized {
       implicitly[TypeTag[java.util.List[T]]]
     }
   }
 
   class JavaArrayListConverter[T : TypeConverter] extends CollectionConverter[java.util.ArrayList[T], T] {
     @transient
-    lazy val targetTypeTag = TypeTag.synchronized {
+    lazy val targetTypeTag = SparkReflectionLock.synchronized {
       implicitly[TypeTag[java.util.ArrayList[T]]]
     }
   }
 
   class JavaSetConverter[T : TypeConverter] extends CollectionConverter[java.util.Set[T], T] {
     @transient
-    lazy val targetTypeTag = TypeTag.synchronized {
+    lazy val targetTypeTag = SparkReflectionLock.synchronized {
       implicitly[TypeTag[java.util.Set[T]]]
     }
   }
 
   class JavaHashSetConverter[T : TypeConverter] extends CollectionConverter[java.util.HashSet[T], T] {
     @transient
-    lazy val targetTypeTag = TypeTag.synchronized {
+    lazy val targetTypeTag = SparkReflectionLock.synchronized {
       implicitly[TypeTag[java.util.HashSet[T]]]
     }
   }
 
   class MapConverter[K : TypeConverter, V : TypeConverter] extends AbstractMapConverter[Map[K, V], K, V] {
     @transient
-    lazy val targetTypeTag = TypeTag.synchronized {
+    lazy val targetTypeTag = SparkReflectionLock.synchronized {
       implicitly[TypeTag[Map[K, V]]]
     }
   }
 
   class TreeMapConverter[K : TypeConverter : Ordering, V : TypeConverter] extends AbstractMapConverter[TreeMap[K, V], K, V] {
     @transient
-    lazy val targetTypeTag = TypeTag.synchronized {
+    lazy val targetTypeTag = SparkReflectionLock.synchronized {
       implicitly[TypeTag[TreeMap[K, V]]]
     }
   }
 
   class JavaMapConverter[K : TypeConverter, V : TypeConverter] extends AbstractMapConverter[java.util.Map[K, V], K, V] {
     @transient
-    lazy val targetTypeTag = TypeTag.synchronized {
+    lazy val targetTypeTag = SparkReflectionLock.synchronized {
       implicitly[TypeTag[java.util.Map[K, V]]]
     }
   }
 
   class JavaHashMapConverter[K : TypeConverter, V : TypeConverter] extends AbstractMapConverter[java.util.HashMap[K, V], K, V] {
     @transient
-    lazy val targetTypeTag = TypeTag.synchronized {
+    lazy val targetTypeTag = SparkReflectionLock.synchronized {
       implicitly[TypeTag[java.util.HashMap[K, V]]]
     }
   }
+
+  implicit def cassandraOptionConverter[T: TypeConverter]: CassandraOptionConverter[T] =
+    new CassandraOptionConverter[T]
 
   implicit def optionConverter[T : TypeConverter]: OptionConverter[T] =
     new OptionConverter[T]
@@ -696,9 +772,19 @@ object TypeConverter {
 
     def targetTypeTag = implicitly[TypeTag[AnyRef]]
 
+    def cassandraOptionToAnyRef(cassandraOption: CassandraOption[_]) = {
+      cassandraOption match {
+        case CassandraOption.Value(x) => nestedConverter.convert(x).asInstanceOf[AnyRef]
+        case CassandraOption.Unset => Unset
+        case CassandraOption.Null => null
+      }
+    }
+
     def convertPF = {
+      case x: CassandraOption[_] => cassandraOptionToAnyRef(x)
       case Some(x) => nestedConverter.convert(x).asInstanceOf[AnyRef]
       case None => null
+      case Unset => Unset
       case x => nestedConverter.convert(x).asInstanceOf[AnyRef]
     }
   }
@@ -753,10 +839,14 @@ object TypeConverter {
     UUIDConverter,
     ByteBufferConverter,
     ByteArrayConverter,
-    UDTValueConverter
+    UDTValueConverter,
+    LocalDateConverter,
+    TimeTypeConverter
   )
 
-  private def forCollectionType(tpe: Type, moreConverters: Seq[TypeConverter[_]]): TypeConverter[_] = TypeTag.synchronized {
+  private val originalConverters = converters.toSet
+
+  private def forCollectionType(tpe: Type, moreConverters: Seq[TypeConverter[_]]): TypeConverter[_] = SparkReflectionLock.synchronized {
     tpe match {
       case TypeRef(_, symbol, List(arg)) =>
         val untypedItemConverter = forType(arg, moreConverters)
@@ -764,6 +854,7 @@ object TypeConverter {
         implicit val itemConverter = untypedItemConverter.asInstanceOf[TypeConverter[T]]
         implicit val ordering = orderingFor(arg).map(_.asInstanceOf[Ordering[T]]).orNull
         symbol match {
+          case CassandraOptionSymbol => cassandraOptionConverter[T]
           case OptionSymbol => optionConverter[T]
           case ListSymbol => listConverter[T]
           case VectorSymbol => vectorConverter[T]
@@ -818,7 +909,7 @@ object TypeConverter {
   /** Useful for getting converter based on a type received from Scala reflection.
     * Synchronized to workaround Scala 2.10 reflection thread-safety problems. */
   def forType(tpe: Type, moreConverters: Seq[TypeConverter[_]] = Seq.empty): TypeConverter[_] = {
-    TypeTag.synchronized {
+    SparkReflectionLock.synchronized {
       type T = TypeConverter[_]
       val selectedConverters =
         (converters ++ moreConverters).collect { case c: T if c.targetTypeTag.tpe =:= tpe => c }
@@ -834,7 +925,7 @@ object TypeConverter {
   /** Useful when implicit converters are not in scope, but a TypeTag is.
     * Synchronized to workaround Scala 2.10 reflection thread-safety problems. */
   def forType[T : TypeTag](moreConverters: Seq[TypeConverter[_]]): TypeConverter[T] = {
-    TypeTag.synchronized {
+    SparkReflectionLock.synchronized {
       forType(implicitly[TypeTag[T]].tpe, moreConverters).asInstanceOf[TypeConverter[T]]
     }
   }
@@ -842,7 +933,7 @@ object TypeConverter {
   /** Useful when implicit converters are not in scope, but a TypeTag is.
     * Synchronized to workaround Scala 2.10 reflection thread-safety problems. */
   def forType[T : TypeTag]: TypeConverter[T] = {
-    TypeTag.synchronized {
+    SparkReflectionLock.synchronized {
       forType(implicitly[TypeTag[T]].tpe).asInstanceOf[TypeConverter[T]]
     }
   }
@@ -852,6 +943,14 @@ object TypeConverter {
   def registerConverter(c: TypeConverter[_]) {
     synchronized {
       converters = c +: converters
+    }
+  }
+
+  /** Remove a custom converter */
+  def unregisterConverter(c: TypeConverter[_]) {
+    synchronized {
+      require(!originalConverters.contains(c), "Cannot unregister built-in converter")
+      converters = converters.filterNot(_ == c)
     }
   }
 }

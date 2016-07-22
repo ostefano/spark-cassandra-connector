@@ -11,7 +11,8 @@ import com.datastax.spark.connector._
 import com.datastax.spark.connector.cql._
 import com.datastax.spark.connector.util.CountingIterator
 import com.datastax.spark.connector.util.Quote._
-import org.apache.spark.{Logging, TaskContext}
+import com.datastax.spark.connector.util.Logging
+import org.apache.spark.TaskContext
 
 import scala.collection._
 
@@ -26,26 +27,20 @@ class TableWriter[T] private (
     rowWriter: RowWriter[T],
     writeConf: WriteConf) extends Serializable with Logging {
 
+  require(tableDef.isView == false,
+    s"${tableDef.name} is a Materialized View and Views are not writable")
+
   val keyspaceName = tableDef.keyspaceName
   val tableName = tableDef.tableName
   val columnNames = rowWriter.columnNames diff writeConf.optionPlaceholders
   val columns = columnNames.map(tableDef.columnByName)
-  implicit val protocolVersion = connector.withClusterDo { _.getConfiguration.getProtocolOptions.getProtocolVersionEnum }
-
-  val defaultTTL = writeConf.ttl match {
-    case TTLOption(StaticWriteOptionValue(value)) => Some(value)
-    case _ => None
-  }
-
-  val defaultTimestamp = writeConf.timestamp match {
-    case TimestampOption(StaticWriteOptionValue(value)) => Some(value)
-    case _ => None
-  }
 
   private[connector] lazy val queryTemplateUsingInsert: String = {
     val quotedColumnNames: Seq[String] = columnNames.map(quote)
     val columnSpec = quotedColumnNames.mkString(", ")
     val valueSpec = quotedColumnNames.map(":" + _).mkString(", ")
+
+    val ifNotExistsSpec = if (writeConf.ifNotExists) "IF NOT EXISTS " else ""
 
     val ttlSpec = writeConf.ttl match {
       case TTLOption(PerRowWriteOptionValue(placeholder)) => Some(s"TTL :$placeholder")
@@ -62,7 +57,7 @@ class TableWriter[T] private (
     val options = List(ttlSpec, timestampSpec).flatten
     val optionsSpec = if (options.nonEmpty) s"USING ${options.mkString(" AND ")}" else ""
 
-    s"INSERT INTO ${quote(keyspaceName)}.${quote(tableName)} ($columnSpec) VALUES ($valueSpec) $optionsSpec".trim
+    s"INSERT INTO ${quote(keyspaceName)}.${quote(tableName)} ($columnSpec) VALUES ($valueSpec) $ifNotExistsSpec$optionsSpec".trim
   }
 
   private lazy val queryTemplateUsingUpdate: String = {
@@ -121,15 +116,16 @@ class TableWriter[T] private (
       case BatchGroupingKey.None => 0
 
       case BatchGroupingKey.ReplicaSet =>
-        if (bs.getRoutingKey == null)
+        if (bs.getRoutingKey(ProtocolVersion.NEWEST_SUPPORTED, CodecRegistry.DEFAULT_INSTANCE) == null)
           bs.setRoutingKey(routingKeyGenerator(bs))
-        session.getCluster.getMetadata.getReplicas(keyspaceName, bs.getRoutingKey).hashCode() // hash code is enough
+        session.getCluster.getMetadata.getReplicas(keyspaceName,
+          bs.getRoutingKey(ProtocolVersion.NEWEST_SUPPORTED, CodecRegistry.DEFAULT_INSTANCE)).hashCode() // hash code is enough
 
       case BatchGroupingKey.Partition =>
-        if (bs.getRoutingKey == null) {
+        if (bs.getRoutingKey(ProtocolVersion.NEWEST_SUPPORTED, CodecRegistry.DEFAULT_INSTANCE) == null) {
           bs.setRoutingKey(routingKeyGenerator(bs))
         }
-        bs.getRoutingKey.duplicate()
+        bs.getRoutingKey(ProtocolVersion.NEWEST_SUPPORTED, CodecRegistry.DEFAULT_INSTANCE).duplicate()
     }
   }
 
@@ -137,13 +133,20 @@ class TableWriter[T] private (
   def write(taskContext: TaskContext, data: Iterator[T]) {
     val updater = OutputMetricsUpdater(taskContext, writeConf)
     connector.withSessionDo { session =>
+      val protocolVersion = session.getCluster.getConfiguration.getProtocolOptions.getProtocolVersion
       val rowIterator = new CountingIterator(data)
       val stmt = prepareStatement(session).setConsistencyLevel(writeConf.consistencyLevel)
       val queryExecutor = new QueryExecutor(session, writeConf.parallelismLevel,
         Some(updater.batchFinished(success = true, _, _, _)), Some(updater.batchFinished(success = false, _, _, _)))
       val routingKeyGenerator = new RoutingKeyGenerator(tableDef, columnNames)
       val batchType = if (isCounterUpdate) Type.COUNTER else Type.UNLOGGED
-      val boundStmtBuilder = new BoundStatementBuilder(rowWriter, stmt, protocolVersion)
+
+      val boundStmtBuilder = new BoundStatementBuilder(
+        rowWriter,
+        stmt,
+        protocolVersion = protocolVersion,
+        ignoreNulls = writeConf.ignoreNulls)
+
       val batchStmtBuilder = new BatchStatementBuilder(batchType, routingKeyGenerator, writeConf.consistencyLevel)
       val batchKeyGenerator = batchRoutingKey(session, routingKeyGenerator) _
       val batchBuilder = new GroupingBatchBuilder(boundStmtBuilder, batchStmtBuilder, batchKeyGenerator,
@@ -165,6 +168,7 @@ class TableWriter[T] private (
 
       val duration = updater.finish() / 1000000000d
       logInfo(f"Wrote ${rowIterator.count} rows to $keyspaceName.$tableName in $duration%.3f s.")
+      if (boundStmtBuilder.logUnsetToNullWarning){ logWarning(boundStmtBuilder.UnsetToNullWarning) }
     }
   }
 }
@@ -261,9 +265,7 @@ object TableWriter {
       columnNames: ColumnSelector,
       writeConf: WriteConf): TableWriter[T] = {
 
-    val schema = Schema.fromCassandra(connector, Some(keyspaceName), Some(tableName))
-    val tableDef = schema.tables.headOption
-      .getOrElse(throw new IOException(s"Table not found: $keyspaceName.$tableName"))
+    val tableDef = Schema.tableFromCassandra(connector, keyspaceName, tableName)
     val selectedColumns = columnNames.selectFrom(tableDef)
     val optionColumns = writeConf.optionsAsColumns(keyspaceName, tableName)
     val rowWriter = implicitly[RowWriterFactory[T]].rowWriter(

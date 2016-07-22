@@ -6,11 +6,12 @@ import java.net.InetAddress
 import scala.collection.JavaConversions._
 import scala.language.reflectiveCalls
 
-import org.apache.spark.{Logging, SparkConf}
+import org.apache.spark.SparkConf
 
 import com.datastax.driver.core.{Cluster, Host, Session}
 import com.datastax.spark.connector.cql.CassandraConnectorConf.CassandraSSLConf
-
+import com.datastax.spark.connector.util.SerialShutdownHooks
+import com.datastax.spark.connector.util.Logging
 
 /** Provides and manages connections to Cassandra.
   *
@@ -30,7 +31,7 @@ import com.datastax.spark.connector.cql.CassandraConnectorConf.CassandraSSLConf
   * A `CassandraConnector` object is configured from [[CassandraConnectorConf]] object which
   * can be either given explicitly or automatically configured from [[org.apache.spark.SparkConf SparkConf]].
   * The connection options are:
-  *   - `spark.cassandra.connection.host`:               contact point to connect to the Cassandra cluster, defaults to spark master host
+  *   - `spark.cassandra.connection.host`:               contact points to connect to the Cassandra cluster, defaults to spark master host
   *   - `spark.cassandra.connection.port`:               Cassandra native port, defaults to 9042
   *   - `spark.cassandra.connection.factory`:            name of a Scala module or class implementing [[CassandraConnectionFactory]] that allows to plugin custom code for connecting to Cassandra
   *   - `spark.cassandra.connection.keep_alive_ms`:      how long to keep unused connection before closing it (default 250 ms)
@@ -144,8 +145,6 @@ class CassandraConnector(conf: CassandraConnectorConf)
 
 object CassandraConnector extends Logging {
 
-  val keepAliveMillis = System.getProperty("spark.cassandra.connection.keep_alive_ms", "250").toInt
-
   private[cql] val sessionCache = new RefCountedCache[CassandraConnectorConf, Session](
     createSession, destroySession, alternativeConnectionConfigs)
 
@@ -181,11 +180,9 @@ object CassandraConnector extends Logging {
     hosts.map(h => conf.copy(hosts = Set(h.getAddress))) + conf.copy(hosts = hosts.map(_.getAddress))
   }
 
-  Runtime.getRuntime.addShutdownHook(new Thread(new Runnable {
-    def run() {
-      sessionCache.shutdown()
-    }
-  }))
+  SerialShutdownHooks.add("Clearing session cache for C* connector")(() => {
+    sessionCache.shutdown()
+  })
 
   /** Returns a CassandraConnector created from properties found in the [[org.apache.spark.SparkConf SparkConf]] object */
   def apply(conf: SparkConf): CassandraConnector = {
@@ -194,18 +191,18 @@ object CassandraConnector extends Logging {
 
   /** Returns a CassandraConnector created from explicitly given connection configuration. */
   def apply(hosts: Set[InetAddress],
-            port: Int = CassandraConnectorConf.DefaultPort,
+            port: Int = CassandraConnectorConf.ConnectionPortParam.default,
             authConf: AuthConf = NoAuthConf,
             localDC: Option[String] = None,
-            keepAliveMillis: Int = CassandraConnectorConf.DefaultKeepAliveMillis,
-            minReconnectionDelayMillis: Int = CassandraConnectorConf.DefaultMinReconnectionDelayMillis,
-            maxReconnectionDelayMillis: Int = CassandraConnectorConf.DefaultMaxReconnectionDelayMillis,
-            queryRetryCount: Int = CassandraConnectorConf.DefaultQueryRetryCount,
-            connectTimeoutMillis: Int = CassandraConnectorConf.DefaultConnectTimeoutMillis,
-            readTimeoutMillis: Int = CassandraConnectorConf.DefaultReadTimeoutMillis,
+            keepAliveMillis: Int = CassandraConnectorConf.KeepAliveMillisParam.default,
+            minReconnectionDelayMillis: Int = CassandraConnectorConf.MinReconnectionDelayParam.default,
+            maxReconnectionDelayMillis: Int = CassandraConnectorConf.MaxReconnectionDelayParam.default,
+            queryRetryCount: Int = CassandraConnectorConf.QueryRetryParam.default,
+            connectTimeoutMillis: Int = CassandraConnectorConf.ConnectionTimeoutParam.default,
+            readTimeoutMillis: Int = CassandraConnectorConf.ReadTimeoutParam.default,
             connectionFactory: CassandraConnectionFactory = DefaultConnectionFactory,
             cassandraSSLConf: CassandraSSLConf = CassandraConnectorConf.DefaultCassandraSSLConf,
-            queryRetryDelay: CassandraConnectorConf.RetryDelayConf = CassandraConnectorConf.DefaultQueryRetryDelay) = {
+            queryRetryDelay: CassandraConnectorConf.RetryDelayConf = CassandraConnectorConf.QueryRetryDelayParam.default) = {
 
     val config = CassandraConnectorConf(
       hosts = hosts,

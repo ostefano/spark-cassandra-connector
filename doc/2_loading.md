@@ -172,7 +172,8 @@ The following table shows recommended Scala types corresponding to Cassandra col
 | `bigint`          | `Long`                                       
 | `blob`            | `ByteBuffer`, `Array[Byte]` 
 | `boolean`         | `Boolean`, `Int`              
-| `counter`         | `Long`                       
+| `counter`         | `Long` 
+| `date`            | `Int`, `String` (YYYY-MM-DD), `java.util.Date`, `java.sql.Date`, `org.joda.time.DateTime`
 | `decimal`         | `BigDecimal`, `java.math.BigDecimal` 
 | `double`          | `Double`    
 | `float`           | `Float`    
@@ -181,14 +182,20 @@ The following table shows recommended Scala types corresponding to Cassandra col
 | `list`            | `Vector`, `List`, `Iterable`, `Seq`, `IndexedSeq`, `java.util.List` 
 | `map`             | `Map`, `TreeMap`, `java.util.HashMap` 
 | `set`             | `Set`, `TreeSet`, `java.util.HashSet` 
+| `smallint`        | `Short`
 | `text`            | `String` 
+| `time`            | `Long`, *Do Not Read this Column as a Date**
 | `timestamp`       | `Long`, `java.util.Date`, `java.sql.Date`, `org.joda.time.DateTime` 
-| `uuid`            | `java.util.UUID` 
 | `timeuuid`        | `java.util.UUID` 
+| `tinyint`         | `Byte`
+| `uuid`            | `java.util.UUID` 
 | `varchar`         | `String` 
 | `varint`          | `BigInt`, `java.math.BigInteger`
 | `frozen<tuple<>>` | `TupleValue`, `scala.Product`, `org.apache.commons.lang3.tuple.Pair`, `org.apache.commons.lang3.tuple.Triple`  
 | user defined      | `UDTValue`
+
+*Since `time` is encoded in nanoseconds from epoch rather than milliseconds there will be Scale
+error with an automatic conversion to `java.util.Date`*
 
 Other conversions might work, but may cause loss of precision or may not work for all values. 
 All types are convertible to strings. Converting strings to numbers, dates, 
@@ -205,8 +212,13 @@ import org.apache.spark.sql.cassandra.CassandraSQLContext
 val sc: SparkContext = ...
 val cc = new CassandraSQLContext(sc)
 val rdd: SchemaRDD = cc.sql("SELECT * from keyspace.table WHERE ...")
+//or since 1.3.0 val rdd: DataFrame = ...
 ```
 
+### Refresh local Cassandra table schema cache
+`CassandraSQLContext` caches Cassandra table schema locally. The cache expires in 10 minutes by default. It can be manually 
+refreshed by calling `cassandraSQLContext.refreshCassandraSchema()` when a Cassandra table schema changes and user can't
+wait for the cache expires automatically.
 
 ## Performing Efficient Joins With Cassandra Tables (since 1.2)
 ### Repartitioning RDDs based on a Cassandra Table's Replication
@@ -236,11 +248,11 @@ as the full partition key is specified.
 
 `joinWithCassandraTable` utilizes the java drive to execute a single query for every partition
 required by the source RDD so no un-needed data will be requested or serialized. This means a join between any RDD
-and a Cassandra Table can be preformed without doing a full table scan. . When preformed
+and a Cassandra Table can be performed without doing a full table scan. When performed
 between two Cassandra Tables which share the same partition key this will *not* require movement of data between machines.
 In all cases this method will use the source RDD's partitioning and placement for data locality.
 
-`joinWithCassandraTable` is not affected by `cassandra.input.split.size` since partitions are automatically inherited from
+`joinWithCassandraTable` is not affected by `cassandra.input.split.size_in_mb` since partitions are automatically inherited from
 the source RDD. The other input properties have their normal effects.
 
 ####Join between two Cassandra Tables Sharing a Partition Key
@@ -301,17 +313,13 @@ val emptyJoin = internalJoin.toEmptyCassandraRDD // Makes an EmptyRDD
 The following options can be specified in the SparkConf object or as a jvm
 -Doption to adjust the read parameters of a Cassandra table.
 
-| Environment Variable                      | Controls                                                   | Default
-|-------------------------------------------|------------------------------------------------------------|---------
-| spark.cassandra.input.split.size_in_mb    | approx amount of data to be fetched into a Spark partition | 64 MB
-| spark.cassandra.input.fetch.size_in_rows  | number of CQL rows fetched per driver request              | 1000
-| spark.cassandra.input.consistency.level   | consistency level to use when reading                      | LOCAL_ONE
+See [Reference Section](reference.md#read-tuning-parameters)
 
 ### Using Implicits for Configuration
 
 In addition you are able to set these parameters on a per table basis by using `implicit vals`. This
 allows a user to define a set of parameters in a separate object and import them into a block of 
-code rather than repeatedly passing the same [`ReadConf` object] (https://github.com/datastax/spark-cassandra-connector/blob/master/spark-cassandra-connector/src/main/scala/com/datastax/spark/connector/rdd/ReadConf.scala#L7-L18).
+code rather than repeatedly passing the same [`ReadConf` object](https://github.com/datastax/spark-cassandra-connector/blob/master/spark-cassandra-connector/src/main/scala/com/datastax/spark/connector/rdd/ReadConf.scala#L7-L18).
 
 ```scala
 object ReadConfigurationOne {

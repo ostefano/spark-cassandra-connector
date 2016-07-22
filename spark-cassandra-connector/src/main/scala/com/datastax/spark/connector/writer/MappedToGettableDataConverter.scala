@@ -4,10 +4,12 @@ import scala.language.existentials
 import scala.reflect.runtime.universe._
 import scala.util.control.NonFatal
 
+import org.apache.spark.sql.catalyst.ReflectionLock.SparkReflectionLock
+
 import com.datastax.spark.connector.util.{Symbols, ReflectionUtil}
 import com.datastax.spark.connector.{GettableByIndexData, TupleValue, UDTValue, ColumnRef}
 import com.datastax.spark.connector.cql.StructDef
-import com.datastax.spark.connector.mapper.{DefaultColumnMapper, TupleColumnMapper, JavaBeanColumnMapper, ColumnMapper}
+import com.datastax.spark.connector.mapper._
 import com.datastax.spark.connector.types.{TupleType, MapType, SetType, ListType, ColumnType, TypeConverter}
 
 private[connector] object MappedToGettableDataConverter {
@@ -34,7 +36,7 @@ private[connector] object MappedToGettableDataConverter {
         * and for everything else uses
         * [[com.datastax.spark.connector.mapper.DefaultColumnMapper DefaultColumnMapper]] */
       private def columnMapper[U: TypeTag]: ColumnMapper[U] = {
-        val tpe = TypeTag.synchronized(typeTag[U].tpe)
+        val tpe = SparkReflectionLock.synchronized(typeTag[U].tpe)
         if (ReflectionUtil.isScalaTuple(tpe))
           new TupleColumnMapper[U]
         else if (isJavaBean)
@@ -51,7 +53,7 @@ private[connector] object MappedToGettableDataConverter {
 
       /** Returns a converter for converting given column to appropriate type savable to Cassandra */
       private def converter[U : TypeTag](columnType: ColumnType[_]): TypeConverter[_ <: AnyRef] = {
-        TypeTag.synchronized {
+        SparkReflectionLock.synchronized {
           val scalaType = typeTag[U].tpe
 
           (columnType, scalaType) match {
@@ -95,6 +97,13 @@ private[connector] object MappedToGettableDataConverter {
             case (t: StructDef, _) if scalaType <:< typeOf[GettableByIndexData] =>
               columnType.converterToCassandra
 
+            //Options
+            case (t: StructDef, TypeRef(_, _, List(argScalaType))) if scalaType <:< typeOf[Option[Any]] =>
+              type U2 = u2 forSome {type u2}
+              implicit val tt = ReflectionUtil.typeToTypeTag[U2](argScalaType)
+              implicit val cm: ColumnMapper[U2] = columnMapper[U2]
+              apply[U2](t, t.columnRefs)
+
             // UDTs mapped to case classes and tuples mapped to Scala tuples.
             // ColumnMappers support mapping Scala tuples, so we don't need a special case for them.
             case (t: StructDef, _) =>
@@ -117,7 +126,7 @@ private[connector] object MappedToGettableDataConverter {
       }
 
       @transient
-      private val tpe = TypeTag.synchronized {
+      private val tpe = SparkReflectionLock.synchronized {
         typeTag[T].tpe
       }
 
@@ -169,6 +178,13 @@ private[connector] object MappedToGettableDataConverter {
           for (i <- columnValues.indices)
             columnValues(i) = converters(i).convert(columnValues(i))
           struct.newInstance(columnValues: _*)
+        case Some(obj) if cls.isInstance(obj) =>
+          val columnValues = extractor.extract(obj.asInstanceOf[T])
+          for (i <- columnValues.indices)
+            columnValues(i) = converters(i).convert(columnValues(i))
+          struct.newInstance(columnValues: _*)
+        case None =>
+          null.asInstanceOf[struct.ValueRepr]
       }
     }
 }

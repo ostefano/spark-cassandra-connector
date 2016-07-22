@@ -1,7 +1,7 @@
 package com.datastax.spark.connector.rdd
 
 import com.datastax.driver.core.ConsistencyLevel
-import com.datastax.spark.connector.util.ConfigCheck
+import com.datastax.spark.connector.util.{ConfigParameter, ConfigCheck}
 import org.apache.spark.SparkConf
 
 /** Read settings for RDD
@@ -12,44 +12,74 @@ import org.apache.spark.SparkConf
   * @param fetchSizeInRows number of CQL rows to fetch in a single round-trip to Cassandra
   * @param consistencyLevel consistency level for reads, default LOCAL_ONE;
   *                         higher consistency level will disable data-locality
-  * @param taskMetricsEnabled whether or not enable task metrics updates (requires Spark 1.2+) */
+  * @param taskMetricsEnabled whether or not enable task metrics updates (requires Spark 1.2+)
+  * @param throughputJoinQueryPerSec maximum read throughput allowed per single core in query/s while
+  *                                  joining a RDD with C* table (joinWithCassandraTable operation)*/
 case class ReadConf(
   splitCount: Option[Int] = None,
-  splitSizeInMB: Int = ReadConf.DefaultSplitSizeInMB,
-  fetchSizeInRows: Int = ReadConf.DefaultFetchSizeInRows,
-  consistencyLevel: ConsistencyLevel = ReadConf.DefaultConsistencyLevel,
-  taskMetricsEnabled: Boolean = ReadConf.DefaultReadTaskMetricsEnabled)
+  splitSizeInMB: Int = ReadConf.SplitSizeInMBParam.default,
+  fetchSizeInRows: Int = ReadConf.FetchSizeInRowsParam.default,
+  consistencyLevel: ConsistencyLevel = ReadConf.ConsistencyLevelParam.default,
+  taskMetricsEnabled: Boolean = ReadConf.TaskMetricParam.default,
+  throughputJoinQueryPerSec: Long = ReadConf.ThroughputJoinQueryPerSecParam.default
+)
 
 
 object ReadConf {
-  val ReadSplitSizeInMBProperty = "spark.cassandra.input.split.size_in_mb"
-  val ReadFetchSizeInRowsProperty = "spark.cassandra.input.fetch.size_in_rows"
-  val ReadConsistencyLevelProperty = "spark.cassandra.input.consistency.level"
-  val ReadTaskMetricsProperty = "spark.cassandra.input.metrics"
+  val ReferenceSection = "Read Tuning Parameters"
+
+  val SplitSizeInMBParam = ConfigParameter[Int](
+    name = "spark.cassandra.input.split.size_in_mb",
+    section = ReferenceSection,
+    default = 64,
+    description = """Approx amount of data to be fetched into a Spark partition""")
+
+  val FetchSizeInRowsParam = ConfigParameter[Int](
+    name = "spark.cassandra.input.fetch.size_in_rows",
+    section = ReferenceSection,
+    default = 1000,
+    description = """Number of CQL rows fetched per driver request""")
+
+  val ConsistencyLevelParam = ConfigParameter[ConsistencyLevel](
+    name = "spark.cassandra.input.consistency.level",
+    section = ReferenceSection,
+    default = ConsistencyLevel.LOCAL_ONE,
+    description = """Consistency level to use when reading	""")
+
+  val TaskMetricParam = ConfigParameter[Boolean](
+    name = "spark.cassandra.input.metrics",
+    section = ReferenceSection,
+    default = true,
+    description = """Sets whether to record connector specific metrics on write"""
+  )
+
+  val ThroughputJoinQueryPerSecParam = ConfigParameter[Long] (
+    name = "spark.cassandra.input.join.throughput_query_per_sec",
+    section = ReferenceSection,
+    default = Long.MaxValue,
+    description =
+      "Maximum read throughput allowed per single core in query/s while joining RDD with C* table")
 
   // Whitelist for allowed Read environment variables
   val Properties = Set(
-    ReadSplitSizeInMBProperty,
-    ReadFetchSizeInRowsProperty,
-    ReadConsistencyLevelProperty,
-    ReadTaskMetricsProperty
+    SplitSizeInMBParam,
+    FetchSizeInRowsParam,
+    ConsistencyLevelParam,
+    TaskMetricParam,
+    ThroughputJoinQueryPerSecParam
   )
-
-  val DefaultSplitSizeInMB = 64 // 64 MB
-  val DefaultFetchSizeInRows = 1000
-  val DefaultConsistencyLevel = ConsistencyLevel.LOCAL_ONE
-  val DefaultReadTaskMetricsEnabled = true
 
   def fromSparkConf(conf: SparkConf): ReadConf = {
 
     ConfigCheck.checkConfig(conf)
 
     ReadConf(
-      fetchSizeInRows = conf.getInt(ReadFetchSizeInRowsProperty, DefaultFetchSizeInRows),
-      splitSizeInMB = conf.getInt(ReadSplitSizeInMBProperty, DefaultSplitSizeInMB),
-      consistencyLevel = ConsistencyLevel.valueOf(
-        conf.get(ReadConsistencyLevelProperty, DefaultConsistencyLevel.name())),
-      taskMetricsEnabled = conf.getBoolean(ReadTaskMetricsProperty, DefaultReadTaskMetricsEnabled)
+      fetchSizeInRows = conf.getInt(FetchSizeInRowsParam.name, FetchSizeInRowsParam.default),
+      splitSizeInMB = conf.getInt(SplitSizeInMBParam.name, SplitSizeInMBParam.default),
+      consistencyLevel = ConsistencyLevel.valueOf(conf.get(ConsistencyLevelParam.name, ConsistencyLevelParam.default.name)),
+      taskMetricsEnabled = conf.getBoolean(TaskMetricParam.name, TaskMetricParam.default),
+      throughputJoinQueryPerSec = conf.getLong(ThroughputJoinQueryPerSecParam.name,
+        ThroughputJoinQueryPerSecParam.default)
     )
   }
 

@@ -6,11 +6,10 @@ import javax.net.ssl.{SSLContext, TrustManagerFactory}
 
 import org.apache.commons.io.IOUtils
 import org.apache.spark.SparkConf
-
 import com.datastax.driver.core.policies.ExponentialReconnectionPolicy
-import com.datastax.driver.core.{Cluster, SSLOptions, SocketOptions}
+import com.datastax.driver.core._
 import com.datastax.spark.connector.cql.CassandraConnectorConf.CassandraSSLConf
-import com.datastax.spark.connector.util.ReflectionUtil
+import com.datastax.spark.connector.util.{ConfigParameter, ReflectionUtil}
 
 /** Creates both native and Thrift connections to Cassandra.
   * The connector provides a DefaultConnectionFactory.
@@ -37,7 +36,7 @@ object DefaultConnectionFactory extends CassandraConnectionFactory {
       .addContactPoints(conf.hosts.toSeq: _*)
       .withPort(conf.port)
       .withRetryPolicy(
-        new MultipleRetryPolicy(conf.queryRetryCount, conf.queryRetryDelay))
+        new MultipleRetryPolicy(conf.queryRetryCount))
       .withReconnectionPolicy(
         new ExponentialReconnectionPolicy(conf.minReconnectionDelayMillis, conf.maxReconnectionDelayMillis))
       .withLoadBalancingPolicy(
@@ -45,6 +44,11 @@ object DefaultConnectionFactory extends CassandraConnectionFactory {
       .withAuthProvider(conf.authConf.authProvider)
       .withSocketOptions(options)
       .withCompression(conf.compression)
+      .withQueryOptions(
+        new QueryOptions()
+          .setRefreshNodeIntervalMillis(0)
+          .setRefreshNodeListIntervalMillis(0)
+          .setRefreshSchemaIntervalMillis(0))
 
     if (conf.cassandraSSLConf.enabled) {
       maybeCreateSSLOptions(conf.cassandraSSLConf) match {
@@ -76,7 +80,10 @@ object DefaultConnectionFactory extends CassandraConnectionFactory {
 
         val context = SSLContext.getInstance(conf.protocol)
         context.init(null, tmf.getTrustManagers, new SecureRandom)
-        new SSLOptions(context, conf.enabledAlgorithms.toArray)
+        JdkSSLOptions.builder()
+          .withSSLContext(context)
+          .withCipherSuites(conf.enabledAlgorithms.toArray)
+          .build()
     }
   }
 
@@ -90,12 +97,22 @@ object DefaultConnectionFactory extends CassandraConnectionFactory {
 /** Entry point for obtaining `CassandraConnectionFactory` object from [[org.apache.spark.SparkConf SparkConf]],
   * used when establishing connections to Cassandra. */
 object CassandraConnectionFactory {
-  val ConnectionFactoryProperty = "spark.cassandra.connection.factory"
-  val Properties = Set(ConnectionFactoryProperty)
+  val ReferenceSection = CassandraConnectorConf.ReferenceSection
+    """Name of a Scala module or class implementing
+      |CassandraConnectionFactory providing connections to the Cassandra cluster""".stripMargin
+
+  val FactoryParam = ConfigParameter[CassandraConnectionFactory](
+    name = "spark.cassandra.connection.factory",
+    section = ReferenceSection,
+    default = DefaultConnectionFactory,
+    description = """Name of a Scala module or class implementing
+      |CassandraConnectionFactory providing connections to the Cassandra cluster""".stripMargin)
+
+  val Properties = Set(FactoryParam)
 
   def fromSparkConf(conf: SparkConf): CassandraConnectionFactory = {
-    conf.getOption(ConnectionFactoryProperty)
+    conf.getOption(FactoryParam.name)
       .map(ReflectionUtil.findGlobalObject[CassandraConnectionFactory])
-      .getOrElse(DefaultConnectionFactory)
+      .getOrElse(FactoryParam.default)
   }
 }

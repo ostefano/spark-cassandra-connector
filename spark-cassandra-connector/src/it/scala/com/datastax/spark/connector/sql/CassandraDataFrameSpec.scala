@@ -2,59 +2,68 @@ package com.datastax.spark.connector.sql
 
 import java.io.IOException
 
+import scala.collection.JavaConversions._
+import scala.concurrent.Future
+
+import com.datastax.spark.connector._
 import com.datastax.spark.connector.SparkCassandraITFlatSpecBase
 import com.datastax.spark.connector.cql.CassandraConnector
-import com.datastax.spark.connector.embedded.EmbeddedCassandra
 import org.apache.spark.sql.SQLContext
+import org.joda.time.LocalDate
 
 class CassandraDataFrameSpec extends SparkCassandraITFlatSpecBase {
   useCassandraConfig(Seq("cassandra-default.yaml.template"))
-  useSparkConf(defaultSparkConf)
+  useSparkConf(defaultConf)
 
-  val conn = CassandraConnector(Set(EmbeddedCassandra.getHost(0)))
-  val keyspace = "DataFramz"
-
+  val conn = CassandraConnector(defaultConf)
 
   val sqlContext: SQLContext = new SQLContext(sc)
 
   def pushDown: Boolean = true
 
-  override def beforeAll(): Unit = {
-    conn.withSessionDo { session =>
-      session.execute( s"""DROP KEYSPACE IF EXISTS "$keyspace"""")
-      session.execute(
-        s"""CREATE KEYSPACE IF NOT EXISTS "$keyspace" WITH REPLICATION =
-                                                      |{ 'class': 'SimpleStrategy',
-                                                      |'replication_factor': 1 }""".stripMargin)
+  conn.withSessionDo { session =>
+    createKeyspace(session)
 
-      session.execute(
-        s"""CREATE TABLE IF NOT EXISTS "$keyspace".kv
-                                                   |(k INT, v TEXT, PRIMARY KEY (k)) """
-          .stripMargin)
+    awaitAll(
+      Future {
+        session.execute(
+          s"""
+             |CREATE TABLE $ks.kv_copy (k INT, v TEXT, PRIMARY KEY (k))
+             |""".stripMargin)
+      },
 
-      session.execute(
-        s"""CREATE TABLE IF NOT EXISTS "$keyspace".kv_copy
-                                                   |(k INT, v TEXT, PRIMARY KEY (k)) """
-          .stripMargin)
+      Future {
+        session.execute(
+          s"""
+             |CREATE TABLE $ks.hardtoremembernamedtable (k INT, v TEXT, PRIMARY KEY (k))
+             |""".stripMargin)
+      },
 
-      session.execute(
-        s"""CREATE TABLE IF NOT EXISTS "$keyspace".hardtoremembernamedtable
-                                                   |(k INT, v TEXT, PRIMARY KEY (k)) """
-          .stripMargin)
+      Future {
+        session.execute(
+          s"""
+              |CREATE TABLE IF NOT EXISTS $ks.kv (k INT, v TEXT, PRIMARY KEY (k))
+              |""".stripMargin)
 
-      val prepared = session.prepare( s"""INSERT INTO "$keyspace".kv (k,v) VALUES (?,?)""")
+        val prepared = session.prepare( s"""INSERT INTO $ks.kv (k, v) VALUES (?, ?)""")
 
-      for (x <- 1 to 1000) {
-        session.execute(prepared.bind(x: java.lang.Integer, x.toString))
+        (for (x <- 1 to 1000) yield {
+          session.executeAsync(prepared.bind(x: java.lang.Integer, x.toString))
+        }).par.foreach(_.getUninterruptibly)
+      },
+
+      Future {
+        session.execute(s"CREATE TABLE $ks.tuple_test1 (id int, t Tuple<text, int>, PRIMARY KEY (id))")
+        session.execute(s"CREATE TABLE $ks.tuple_test2 (id int, t Tuple<text, int>, PRIMARY KEY (id))")
+        session.execute(s"INSERT INTO $ks.tuple_test1 (id, t) VALUES (1, ('xyz', 3))")
+      },
+
+      Future {
+        session.execute(s"create table $ks.date_test (key int primary key, dd date)")
+        session.execute(s"create table $ks.date_test2 (key int primary key, dd date)")
+        session.execute(s"insert into $ks.date_test (key, dd) values (1, '1930-05-31')")
       }
-    }
-  }
-
-  override def afterAll() {
-    super.afterAll()
-    conn.withSessionDo { session =>
-      session.execute( s"""DROP KEYSPACE IF EXISTS "$keyspace"""")
-    }
+    )
   }
 
   "A DataFrame" should "be able to be created programmatically" in {
@@ -64,7 +73,7 @@ class CassandraDataFrameSpec extends SparkCassandraITFlatSpecBase {
       .options(
         Map(
           "table" -> "kv",
-          "keyspace" -> keyspace
+          "keyspace" -> ks
         )
       )
       .load()
@@ -72,14 +81,14 @@ class CassandraDataFrameSpec extends SparkCassandraITFlatSpecBase {
     df.count() should be(1000)
   }
 
-  it should "be able to be saved programatically" in {
+  it should "be able to be saved programmatically" in {
     val df = sqlContext
       .read
       .format("org.apache.spark.sql.cassandra")
       .options(
         Map(
           "table" -> "kv",
-          "keyspace" -> keyspace
+          "keyspace" -> ks
         )
       )
       .load()
@@ -89,7 +98,8 @@ class CassandraDataFrameSpec extends SparkCassandraITFlatSpecBase {
       .options(
         Map(
           "table" -> "kv_copy",
-          "keyspace" -> keyspace
+          "keyspace" -> ks,
+          "spark.cassandra.output.ttl" -> "300"
         )
       )
       .save()
@@ -100,12 +110,41 @@ class CassandraDataFrameSpec extends SparkCassandraITFlatSpecBase {
       .options(
         Map(
           "table" -> "kv_copy",
-          "keyspace" -> keyspace
+          "keyspace" -> ks
         )
       )
       .load()
 
     dfCopy.count() should be (1000)
+
+    val ttl = conn.withSessionDo { session =>
+      val rs = session.execute(s"""SELECT TTL(v) from $ks.kv_copy""")
+      rs.one().getInt(0)
+    }
+
+    ttl should be > 0
+    ttl should be <= 300
+  }
+
+  it should " be able to create a C* schema from a table" in {
+     val df = sqlContext
+      .read
+      .format("org.apache.spark.sql.cassandra")
+      .options(
+        Map(
+          "table" -> "kv",
+          "keyspace" -> ks
+        )
+      )
+      .load()
+
+    df.createCassandraTable(ks, "kv_auto", Some(Seq("v")), Some(Seq("k")))
+
+    val meta = conn.withClusterDo(_.getMetadata)
+    val autoTableMeta = meta.getKeyspace(ks).getTable("kv_auto")
+    autoTableMeta.getPartitionKey.map(_.getName) should contain ("v")
+    autoTableMeta.getClusteringColumns.map(_.getName) should contain ("k")
+
   }
 
   it should " provide error out with a sensible message when a table can't be found" in {
@@ -116,7 +155,7 @@ class CassandraDataFrameSpec extends SparkCassandraITFlatSpecBase {
         .options(
           Map(
             "table" -> "randomtable",
-            "keyspace" -> keyspace
+            "keyspace" -> ks
           )
         )
         .load()
@@ -132,7 +171,7 @@ class CassandraDataFrameSpec extends SparkCassandraITFlatSpecBase {
         .options(
           Map(
             "table" -> "hardertoremembertablename",
-            "keyspace" -> keyspace
+            "keyspace" -> ks
           )
         )
         .load
@@ -140,4 +179,47 @@ class CassandraDataFrameSpec extends SparkCassandraITFlatSpecBase {
     exception.getMessage should include("Couldn't find")
     exception.getMessage should include("hardtoremembernamedtable")
   }
+
+  it should "read and write C* Tuple columns" in {
+    val df = sqlContext
+      .read
+      .format("org.apache.spark.sql.cassandra")
+      .options(Map("table" -> "tuple_test1", "keyspace" -> ks, "cluster" -> "ClusterOne"))
+      .load
+
+    df.count should be (1)
+    df.first.getStruct(1).getString(0) should be ("xyz")
+    df.first.getStruct(1).getInt(1) should be (3)
+
+    df.write
+      .format("org.apache.spark.sql.cassandra")
+      .options(Map("table" -> "tuple_test2", "keyspace" -> ks, "cluster" -> "ClusterOne"))
+      .save
+
+    conn.withSessionDo { session =>
+      session.execute(s"select count(1) from $ks.tuple_test2").one().getLong(0) should be (1)
+    }
+  }
+
+  it should "read and write C* LocalDate columns" in {
+    val df = sqlContext
+      .read
+      .format("org.apache.spark.sql.cassandra")
+      .options(Map("table" -> "date_test", "keyspace" -> ks, "cluster" -> "ClusterOne"))
+      .load
+
+    df.count should be (1)
+    df.first.getDate(1) should be (new LocalDate(1930, 5, 31).toDate)
+
+    df.write
+      .format("org.apache.spark.sql.cassandra")
+      .options(Map("table" -> "date_test2", "keyspace" -> ks, "cluster" -> "ClusterOne"))
+      .save
+
+    conn.withSessionDo { session =>
+      session.execute(s"select count(1) from $ks.date_test2").one().getLong(0) should be (1)
+    }
+  }
+
+
 }

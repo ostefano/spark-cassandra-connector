@@ -4,11 +4,24 @@ import java.net.InetAddress
 import java.nio.ByteBuffer
 import java.util.{UUID, Date}
 
-import com.datastax.driver.core.{TupleType => DriverTupleType, UserType => DriverUserType, ProtocolVersion, DataType}
-import com.datastax.spark.connector.util.Symbols
+import org.apache.spark.SparkEnv
+import org.apache.spark.sql.catalyst.ReflectionLock.SparkReflectionLock
+
+import com.datastax.driver.core.{TupleType => DriverTupleType, UserType => DriverUserType, DataType}
+import com.datastax.spark.connector.util.{ConfigParameter, ReflectionUtil, Symbols}
 
 import scala.collection.JavaConversions._
 import scala.reflect.runtime.universe._
+
+import org.apache.spark.sql.types.{
+  DataType => SparkSqlDataType,
+  DateType => SparkSqlDateType,
+  FloatType => SparkSqlFloatType,
+  DoubleType => SparkSqlDoubleType,
+  DecimalType => SparkSqlDecimalType,
+  BooleanType => SparkSqlBooleanType,
+  TimestampType => SparkSqlTimestampType,
+  MapType => SparkSqlMapType, _}
 
 /** Serializable representation of column data type. */
 trait ColumnType[T] extends Serializable {
@@ -25,7 +38,7 @@ trait ColumnType[T] extends Serializable {
 
   /** Name of the Scala type. Useful for source generation.*/
   def scalaTypeName: String
-    = TypeTag.synchronized(scalaTypeTag.tpe.toString)
+    = SparkReflectionLock.synchronized(scalaTypeTag.tpe.toString)
 
   /** Name of the CQL type. Useful for CQL generation.*/
   def cqlTypeName: String
@@ -33,14 +46,33 @@ trait ColumnType[T] extends Serializable {
   def isCollection: Boolean
 }
 
+object ColumnTypeConf {
+
+  val ReferenceSection = "Custom Cassandra Type Parameters (Expert Use Only)"
+
+  val CustomDriverTypeParam = ConfigParameter[Option[String]](
+    name = "spark.cassandra.dev.customFromDriver",
+    section = ReferenceSection,
+    default = None,
+    description = """Provides an additional class implementing CustomDriverConverter for those
+        |clients that need to read non-standard primitive Cassandra types. If your C* implementation
+        |uses a Java Driver which can read DataType.custom() you may need it this. If you are using
+        |OSS Cassandra this should never be used.""".stripMargin('|')
+  )
+
+  val Properties = Set(CustomDriverTypeParam)
+}
+
 object ColumnType {
 
-  private val primitiveTypeMap = Map[DataType, ColumnType[_]](
+  private[connector] val primitiveTypeMap = Map[DataType, ColumnType[_]](
     DataType.text() -> TextType,
     DataType.ascii() -> AsciiType,
     DataType.varchar() -> VarCharType,
     DataType.cint() -> IntType,
     DataType.bigint() -> BigIntType,
+    DataType.smallint() -> SmallIntType,
+    DataType.tinyint() -> TinyIntType,
     DataType.cfloat() -> FloatType,
     DataType.cdouble() -> DoubleType,
     DataType.cboolean() -> BooleanType,
@@ -51,8 +83,18 @@ object ColumnType {
     DataType.uuid() -> UUIDType,
     DataType.timeuuid() -> TimeUUIDType,
     DataType.blob() -> BlobType,
-    DataType.counter() -> CounterType
+    DataType.counter() -> CounterType,
+    DataType.date() -> DateType,
+    DataType.time() -> TimeType
   )
+
+  private lazy val customFromDriverRow: PartialFunction[DataType, ColumnType[_]] = {
+    Option(SparkEnv.get)
+      .flatMap(env => env.conf.getOption(ColumnTypeConf.CustomDriverTypeParam.name))
+      .flatMap(className => Some(ReflectionUtil.findGlobalObject[CustomDriverConverter](className)))
+      .flatMap(clazz => Some(clazz.fromDriverRowExtension))
+      .getOrElse(PartialFunction.empty)
+  }
 
   /** Makes sure the sequence does not contain any lazy transformations.
     * This guarantees that if T is Serializable, the collection is Serializable. */
@@ -68,15 +110,49 @@ object ColumnType {
       TupleFieldDef(index, fromDriverType(field))
   }
 
+  private def typeArg(dataType: DataType, idx: Int) = fromDriverType(dataType.getTypeArguments.get(idx))
+
+  private val standardFromDriverRow: PartialFunction[DataType, ColumnType[_]] = {
+    case listType if listType.getName == DataType.Name.LIST => ListType(typeArg(listType, 0))
+    case setType if setType.getName == DataType.Name.SET => SetType(typeArg(setType, 0))
+    case mapType if mapType.getName == DataType.Name.MAP => MapType(typeArg(mapType, 0), typeArg(mapType, 1))
+    case userType: DriverUserType => UserDefinedType(userType.getTypeName, fields(userType))
+    case tupleType: DriverTupleType => TupleType(fields(tupleType): _*)
+    case dataType => primitiveTypeMap(dataType)
+  }
+
   def fromDriverType(dataType: DataType): ColumnType[_] = {
-    val typeArgs = dataType.getTypeArguments.map(fromDriverType)
-    (dataType, dataType.getName) match {
-      case (_, DataType.Name.LIST) => ListType(typeArgs(0))
-      case (_, DataType.Name.SET)  => SetType(typeArgs(0))
-      case (_, DataType.Name.MAP)  => MapType(typeArgs(0), typeArgs(1))
-      case (userType: DriverUserType, _) => UserDefinedType(userType.getTypeName, fields(userType))
-      case (tupleType: DriverTupleType, _) => TupleType(fields(tupleType): _*)
-      case _ => primitiveTypeMap(dataType)
+    val getColumnType: PartialFunction[DataType, ColumnType[_]] = customFromDriverRow orElse standardFromDriverRow
+    getColumnType(dataType)
+  }
+
+  /** Returns natural Cassandra type for representing data of the given Spark SQL type */
+  def fromSparkSqlType(dataType: SparkSqlDataType): ColumnType[_] = {
+
+    def unsupportedType() = throw new IllegalArgumentException(s"Unsupported type: $dataType")
+
+    dataType match {
+      case ByteType => IntType
+      case ShortType => IntType
+      case IntegerType => IntType
+      case LongType => BigIntType
+      case SparkSqlFloatType => FloatType
+      case SparkSqlDoubleType => DoubleType
+      case StringType => VarCharType
+      case BinaryType => BlobType
+      case SparkSqlBooleanType => BooleanType
+      case SparkSqlTimestampType => TimestampType
+      case SparkSqlDateType => DateType
+      case SparkSqlDecimalType() => DecimalType
+      case ArrayType(sparkSqlElementType, containsNull) =>
+        val argType = fromSparkSqlType(sparkSqlElementType)
+        ListType(argType)
+      case SparkSqlMapType(sparkSqlKeyType, sparkSqlValueType, containsNull) =>
+        val keyType = fromSparkSqlType(sparkSqlKeyType)
+        val valueType = fromSparkSqlType(sparkSqlValueType)
+        MapType(keyType, valueType)
+      case _ =>
+        unsupportedType()
     }
   }
 
@@ -90,6 +166,10 @@ object ColumnType {
     else if (dataType =:= typeOf[java.lang.Integer]) IntType
     else if (dataType =:= typeOf[Long]) BigIntType
     else if (dataType =:= typeOf[java.lang.Long]) BigIntType
+    else if (dataType =:= typeOf[Short]) SmallIntType
+    else if (dataType =:= typeOf[java.lang.Short]) SmallIntType
+    else if (dataType =:= typeOf[Byte]) TinyIntType
+    else if (dataType =:= typeOf[java.lang.Byte]) TinyIntType
     else if (dataType =:= typeOf[Float]) FloatType
     else if (dataType =:= typeOf[java.lang.Float]) FloatType
     else if (dataType =:= typeOf[Double]) DoubleType
@@ -135,7 +215,7 @@ object ColumnType {
 
   /** Returns a converter that converts values to the type of this column expected by the
     * Cassandra Java driver when saving the row.*/
-  def converterToCassandra(dataType: DataType)(implicit protocolVersion: ProtocolVersion)
+  def converterToCassandra(dataType: DataType)
       : TypeConverter[_ <: AnyRef] = {
 
     val typeArgs = dataType.getTypeArguments.map(converterToCassandra)
