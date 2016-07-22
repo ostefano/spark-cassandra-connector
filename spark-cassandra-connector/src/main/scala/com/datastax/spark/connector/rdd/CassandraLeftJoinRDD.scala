@@ -1,20 +1,14 @@
 package com.datastax.spark.connector.rdd
 
-import org.apache.spark.metrics.InputMetricsUpdater
-
-import com.datastax.driver.core.{ ResultSet, Session }
+import com.datastax.driver.core.{ResultSet, Session}
 import com.datastax.spark.connector._
 import com.datastax.spark.connector.cql._
-import com.datastax.spark.connector.util.CqlWhereParser.{ EqPredicate, InListPredicate, InPredicate, RangePredicate }
-import com.datastax.spark.connector.util.{ CountingIterator, CqlWhereParser }
-import com.datastax.spark.connector.writer._
 import com.datastax.spark.connector.rdd.reader._
-import com.datastax.spark.connector.util.Quote._
+import com.datastax.spark.connector.writer._
+import com.google.common.util.concurrent.{FutureCallback, Futures, SettableFuture}
 import org.apache.spark.rdd.RDD
-import org.apache.spark.{ Partition, TaskContext }
-import scala.reflect.ClassTag
 
-import com.google.common.util.concurrent.{ FutureCallback, Futures, SettableFuture }
+import scala.reflect.ClassTag
 
 /**
  * An [[org.apache.spark.rdd.RDD RDD]] that will do a selecting join between `left` RDD and the specified
@@ -42,7 +36,7 @@ class CassandraLeftJoinRDD[L, R] private[connector] (
   implicit
   val leftClassTag: ClassTag[L],
   val rightClassTag: ClassTag[R],
-  @transient override val rowWriterFactory: RowWriterFactory[L],
+  @transient val rowWriterFactory: RowWriterFactory[L],
   @transient val rowReaderFactory: RowReaderFactory[R]
 )
     extends CassandraRDD[(L, Option[R])](left.sparkContext, left.dependencies)
@@ -53,7 +47,7 @@ class CassandraLeftJoinRDD[L, R] private[connector] (
 
   override protected val classTag = rightClassTag
 
-  override lazy val rowReader = manualRowReader match {
+  override lazy val rowReader: RowReader[R] = manualRowReader match {
     case Some(rr) => rr
     case None => rowReaderFactory.rowReader(tableDef, columnNames.selectFrom(tableDef))
   }
@@ -143,7 +137,7 @@ class CassandraLeftJoinRDD[L, R] private[connector] (
     )
   }
 
-  private[rdd] override def fetchIterator(
+  private[rdd] def fetchIterator(
     session: Session,
     bsb: BoundStatementBuilder[L],
     leftIterator: Iterator[L]
@@ -180,5 +174,4 @@ class CassandraLeftJoinRDD[L, R] private[connector] (
     }).toList
     queryFutures.iterator.flatMap(_.get)
   }
-
 }

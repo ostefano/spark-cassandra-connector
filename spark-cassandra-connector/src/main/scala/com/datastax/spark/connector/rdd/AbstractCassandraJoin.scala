@@ -1,18 +1,14 @@
 package com.datastax.spark.connector.rdd
 
-import org.apache.spark.metrics.InputMetricsUpdater
-
-import com.datastax.spark.connector._
-import com.datastax.spark.connector.writer._
-import com.datastax.spark.connector.rdd.reader._
-import com.datastax.spark.connector.util.CqlWhereParser.{ EqPredicate, InListPredicate, InPredicate, RangePredicate }
-import com.datastax.spark.connector.util.{ CountingIterator, CqlWhereParser }
-import com.datastax.spark.connector.util.Quote._
-
 import com.datastax.driver.core.Session
-
-import org.apache.spark.{ Partition, TaskContext }
+import com.datastax.spark.connector._
+import com.datastax.spark.connector.util.CqlWhereParser.{EqPredicate, InListPredicate, InPredicate, RangePredicate}
+import com.datastax.spark.connector.util.Quote._
+import com.datastax.spark.connector.util.{CountingIterator, CqlWhereParser}
+import com.datastax.spark.connector.writer._
+import org.apache.spark.metrics.InputMetricsUpdater
 import org.apache.spark.rdd.RDD
+import org.apache.spark.{Partition, TaskContext}
 
 /**
  * This trait contains shared methods from [[com.datastax.spark.connector.rdd.CassandraJoinRDD]] and

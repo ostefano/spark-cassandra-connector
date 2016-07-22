@@ -1,20 +1,14 @@
 package com.datastax.spark.connector.rdd
 
-import org.apache.spark.metrics.InputMetricsUpdater
-
-import com.datastax.driver.core.{ ResultSet, Session }
+import com.datastax.driver.core.{ResultSet, Session}
 import com.datastax.spark.connector._
 import com.datastax.spark.connector.cql._
 import com.datastax.spark.connector.rdd.reader._
-import com.datastax.spark.connector.util.CqlWhereParser.{ EqPredicate, InListPredicate, InPredicate, RangePredicate }
-import com.datastax.spark.connector.util.{ CountingIterator, CqlWhereParser }
 import com.datastax.spark.connector.writer._
-import com.datastax.spark.connector.util.Quote._
+import com.google.common.util.concurrent.{FutureCallback, Futures, SettableFuture}
 import org.apache.spark.rdd.RDD
-import org.apache.spark.{ Partition, TaskContext }
-import scala.reflect.ClassTag
 
-import com.google.common.util.concurrent.{ FutureCallback, Futures, SettableFuture }
+import scala.reflect.ClassTag
 
 /**
  * An [[org.apache.spark.rdd.RDD RDD]] that will do a selecting join between `left` RDD and the specified
